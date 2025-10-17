@@ -1,20 +1,22 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-.gradient-bg {
-  background: linear-gradient(-45deg, #e0e7ff, #c7d2fe, #a5b4fc, #6366f1);
+
+/* ✨ NEW: Professional, subtle animated background */
+.animated-bg {
+  background: linear-gradient(
+    -45deg,
+    #f3f4f6, /* gray-100 */
+    #e5e7eb, /* gray-200 */
+    #d1d5db, /* gray-300 */
+    #e5e7eb  /* gray-200 */
+  );
   background-size: 400% 400%;
-  animation: gradient 15s ease infinite;
+  animation: gradient 20s ease infinite;
 }
 
 @keyframes gradient {
-  0% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-  100% {
-    background-position: 0% 50%;
-  }
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
 }
