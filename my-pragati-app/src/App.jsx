@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { BrowserRouter as Router, Routes, Route, useParams, useNavigate, Navigate } from 'react-router-dom';
 import { initializeApp } from 'firebase/app';
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import { getFirestore, doc, collection, onSnapshot, updateDoc, deleteDoc, addDoc, serverTimestamp, query, orderBy, setDoc, writeBatch } from 'firebase/firestore';
@@ -20,50 +21,32 @@ const PRIORITY_STYLES = {
 };
 
 // --- HELPER FUNCTIONS ---
-const getTaskCollectionPath = (userId, viewMode, groupId) => {
-    if (!userId) return null;
-    if (viewMode === 'private') {
-        return `artifacts/${appId}/users/${userId}/tasks`;
+const getTaskCollectionPath = (userId, viewMode, groupId) => { if (!userId) return null; if (viewMode === 'private') { return `artifacts/${appId}/users/${userId}/tasks`; } if (viewMode === 'group' && groupId.trim()) { return `artifacts/${appId}/public/data/groups/${groupId.trim()}/tasks`; } return null; };
+const getCommentCollectionPath = (userId, viewMode, groupId, taskId) => { if (!taskId) return null; const taskPath = getTaskCollectionPath(userId, viewMode, groupId); return taskPath ? `${taskPath}/${taskId}/comments` : null; };
+
+// ✨ NEW: This function now performs the database writes directly
+const joinGroupSecurely = async (groupId, user) => {
+    if (!groupId || !user || !user.uid || !user.email) {
+        throw new Error("Invalid user or group ID provided.");
     }
-    if (viewMode === 'group' && groupId.trim()) {
-        return `artifacts/${appId}/public/data/groups/${groupId.trim()}/tasks`;
-    }
-    return null;
-};
-const getCommentCollectionPath = (userId, viewMode, groupId, taskId) => {
-    if (!taskId) return null;
-    const taskPath = getTaskCollectionPath(userId, viewMode, groupId);
-    return taskPath ? `${taskPath}/${taskId}/comments` : null;
+    const batch = writeBatch(db);
+    // Add group to user's private list
+    const userGroupRef = doc(db, `users/${user.uid}/groups`, groupId);
+    batch.set(userGroupRef, { id: groupId, role: "member", joinedAt: serverTimestamp() });
+    // Add user to the group's public member list
+    const memberRef = doc(db, `artifacts/${appId}/public/data/groups/${groupId}/members`, user.uid);
+    batch.set(memberRef, { email: user.email, role: "member" });
+    await batch.commit();
 };
 
 // --- UI COMPONENTS ---
+
 const CommentsSection = ({ userId, currentUserEmail, taskId, viewMode, groupId }) => {
-    const [comments, setComments] = useState([]);
-    const [newComment, setNewComment] = useState('');
+    const [comments, setComments] = useState([]); const [newComment, setNewComment] = useState('');
     const commentCollectionPath = getCommentCollectionPath(userId, viewMode, groupId, taskId);
-
-    useEffect(() => {
-        if (!db || !commentCollectionPath) return;
-        const q = query(collection(db, commentCollectionPath), orderBy('createdAt', 'asc'));
-        const unsub = onSnapshot(q, (snapshot) => setComments(snapshot.docs.map(d => ({ id: d.id, ...d.data() }))));
-        return () => unsub();
-    }, [commentCollectionPath]);
-
-    const handleAddComment = async (e) => {
-        e.preventDefault();
-        if (!db || !commentCollectionPath || !newComment.trim()) return;
-        try {
-            await addDoc(collection(db, commentCollectionPath), {
-                text: newComment.trim(),
-                createdBy: currentUserEmail || `User ${userId.substring(0, 8)}`,
-                createdAt: serverTimestamp(),
-            });
-            setNewComment('');
-        } catch (err) { console.error("Error adding comment:", err); }
-    };
-
+    useEffect(() => { if (!db || !commentCollectionPath) return; const q = query(collection(db, commentCollectionPath), orderBy('createdAt', 'asc')); const unsub = onSnapshot(q, (snapshot) => setComments(snapshot.docs.map(d => ({ id: d.id, ...d.data() })))); return () => unsub(); }, [commentCollectionPath]);
+    const handleAddComment = async (e) => { e.preventDefault(); if (!db || !commentCollectionPath || !newComment.trim()) return; try { await addDoc(collection(db, commentCollectionPath), { text: newComment.trim(), createdBy: currentUserEmail || `User ${userId.substring(0, 8)}`, createdAt: serverTimestamp() }); setNewComment(''); } catch (err) { console.error("Error adding comment:", err); } };
     const formatDate = (ts) => ts ? new Date(ts.seconds * 1000).toLocaleString() : 'Just now';
-
     return <div className="mt-6 bg-gray-50 p-4 rounded-lg border border-gray-200"><h3 className="text-lg font-semibold text-gray-800 mb-4">Comments ({comments.length})</h3><div className="space-y-3 max-h-60 overflow-y-auto pr-2 mb-4">{comments.length === 0 ? <p className="text-sm text-gray-500 text-center py-4">Be the first to leave a comment.</p> : comments.map(c => <div key={c.id} className="bg-white p-3 rounded-lg border border-gray-200 shadow-sm"><div className="flex justify-between items-center text-xs mb-1"><span className="font-semibold text-blue-700">{c.createdBy}</span><span className="text-gray-500">{formatDate(c.createdAt)}</span></div><p className="text-sm text-gray-700 whitespace-pre-wrap">{c.text}</p></div>)}</div><form onSubmit={handleAddComment} className="flex space-x-2"><textarea value={newComment} onChange={(e) => setNewComment(e.target.value)} rows="2" className="flex-grow p-2 border bg-white border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none text-sm text-gray-800 placeholder-gray-400" placeholder="Write a comment..." /><button type="submit" disabled={!newComment.trim()} className="self-end px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg shadow-sm hover:bg-blue-700 transition duration-150 disabled:opacity-50 disabled:cursor-not-allowed">Post</button></form></div>
 };
 
@@ -102,7 +85,29 @@ const ManageWorkspaceModal = ({ isOpen, onClose, currentGroupId, currentUserId }
 
 const Footer = () => <footer className="w-full py-6 mt-auto"><p className="text-center text-sm text-gray-500">© {new Date().getFullYear()} Pragati Board. Built by Akshay Nayak.</p></footer>;
 
-// --- MAIN VIEW ---
+const JoinHandler = () => {
+    const { groupId } = useParams();
+    const navigate = useNavigate();
+    const [status, setStatus] = useState('Processing invite...');
+    useEffect(() => {
+        if (!auth) return;
+        const user = auth.currentUser;
+        if (user) {
+            joinGroupSecurely(groupId, user)
+                .then(() => {
+                    localStorage.setItem('pragati-viewMode', 'group');
+                    localStorage.setItem('pragati-currentGroupId', groupId);
+                    navigate('/');
+                })
+                .catch(error => { console.error("Error joining group:", error); setStatus(`Error: ${error.message}`); });
+        } else {
+            sessionStorage.setItem('pending-join-groupId', groupId);
+            navigate('/auth');
+        }
+    }, [groupId, navigate]);
+    return <div className="flex items-center justify-center min-h-screen bg-gray-50 animated-bg"><div className="text-gray-700 font-medium text-lg">{status}</div></div>;
+};
+
 const TaskManagementView = ({ currentUserId, onLogout, currentUserEmail }) => {
     const [viewMode, setViewMode] = useState(() => localStorage.getItem('pragati-viewMode') || 'private');
     const [currentGroupId, setCurrentGroupId] = useState(() => localStorage.getItem('pragati-currentGroupId') || '');
@@ -142,10 +147,9 @@ const TaskManagementView = ({ currentUserId, onLogout, currentUserEmail }) => {
     
     const handleUpdateTaskStatus = async (taskId, newStatus) => {
         const path = getTaskCollectionPath(currentUserId, viewMode, currentGroupId);
-        console.log(`[handleUpdateTaskStatus] Attempting update. Path: ${path}, Task ID: ${taskId}, New Status: ${newStatus}`);
         if (!path) { console.error("Update failed: No valid path."); return; }
-        try { await updateDoc(doc(db, path, taskId), { status: newStatus }); console.log("✅ Firestore update successful!"); } 
-        catch (e) { console.error("❌ Firestore update FAILED:", e); }
+        try { await updateDoc(doc(db, path, taskId), { status: newStatus }); } 
+        catch (e) { console.error("Firestore update FAILED:", e); }
     };
     
     const handleCreateOrUpdateTask = async (taskData, taskId = null) => { const path = getTaskCollectionPath(currentUserId, viewMode, currentGroupId); if (!path) return; try { if (taskId) { await updateDoc(doc(db, path, taskId), taskData); } else { await addDoc(collection(db, path), { ...taskData, status: STATUSES[0], createdBy: currentUserEmail, createdAt: serverTimestamp() }); setIsModalOpen(false); } } catch(e) { console.error(e); }};
@@ -160,20 +164,12 @@ const TaskManagementView = ({ currentUserId, onLogout, currentUserEmail }) => {
     const handleDragEnd = (e) => e.currentTarget.classList.remove('opacity-30'); 
     const handleDragOver = (e, status) => { e.preventDefault(); setIsDragOver(status); }; 
     const handleDragLeave = () => setIsDragOver(null);
-    const handleDrop = (e, targetStatus) => {
-        console.log(`[handleDrop] Drop event for column: ${targetStatus}`);
-        e.preventDefault(); setIsDragOver(null);
-        const data = e.dataTransfer.getData("text/plain");
-        if (!data) { console.error("Drop failed: No dataTransfer data."); return; }
-        try { const { taskId, currentStatus } = JSON.parse(data); console.log(`[handleDrop] Parsed data - Task ID: ${taskId}, From: ${currentStatus}, To: ${targetStatus}`); if (currentStatus !== targetStatus) { handleUpdateTaskStatus(taskId, targetStatus); } } catch (e) { console.error("Drop failed: Could not parse dataTransfer.", e); }
-    };
+    const handleDrop = (e, targetStatus) => { e.preventDefault(); setIsDragOver(null); const data = e.dataTransfer.getData("text/plain"); if (!data) return; try { const { taskId, currentStatus } = JSON.parse(data); if (currentStatus !== targetStatus) handleUpdateTaskStatus(taskId, targetStatus); } catch (e) { console.error("Drop failed: Could not parse dataTransfer.", e); } };
 
     return (
         <div className="flex min-h-screen font-sans bg-gray-50 text-gray-800 animated-bg">
             <aside className="w-64 flex-shrink-0 bg-white/80 backdrop-blur-xl border-r border-gray-200 flex flex-col">
-                <div className="flex items-center justify-center h-16 border-b border-gray-200 flex-shrink-0 px-4">
-                    <h1 className="text-xl font-bold text-gray-800 tracking-tight">Pragati Board</h1>
-                </div>
+                <div className="flex items-center justify-center h-16 border-b border-gray-200 flex-shrink-0 px-4"><h1 className="text-xl font-bold text-gray-800 tracking-tight">Pragati Board</h1></div>
                 <nav className="flex-grow p-4 space-y-2">
                     <p className="px-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">Workspaces</p>
                     <button onClick={() => { setViewMode('private'); setCurrentGroupId(''); }} className={`w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-colors ${viewMode === 'private' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}>Individual</button>
@@ -210,14 +206,49 @@ const TaskManagementView = ({ currentUserId, onLogout, currentUserEmail }) => {
 // --- ROOT APP COMPONENT ---
 const App = () => {
     const [currentUserId, setCurrentUserId] = useState(null); const [currentUserEmail, setCurrentUserEmail] = useState(null); const [isAuthReady, setIsAuthReady] = useState(false); const [authLoading, setAuthLoading] = useState(false); const [authError, setAuthError] = useState(null);
-    useEffect(() => { try { if (!app) { app = initializeApp(firebaseConfig); db = getFirestore(app); auth = getAuth(app); } const unsub = onAuthStateChanged(auth, (user) => { if (user) { setCurrentUserId(user.uid); setCurrentUserEmail(user.email); } else { setCurrentUserId(null); setCurrentUserEmail(null); } setIsAuthReady(true); }); return () => unsub(); } catch (e) { console.error("Firebase setup error:", e); setIsAuthReady(true); } }, []);
+    useEffect(() => {
+        try {
+            if (!app) { app = initializeApp(firebaseConfig); db = getFirestore(app); auth = getAuth(app); }
+            const unsub = onAuthStateChanged(auth, (user) => { setCurrentUserId(user ? user.uid : null); setCurrentUserEmail(user ? user.email : null); setIsAuthReady(true); });
+            return () => unsub();
+        } catch (e) { console.error("Firebase setup error:", e); setIsAuthReady(true); }
+    }, []);
     const handleAuthError = (error) => { setAuthLoading(false); let msg = "Authentication failed. Please try again."; if(error.code) { if (error.code.includes('invalid-email')) msg = "Invalid email format."; else if (error.code.includes('user-not-found') || error.code.includes('wrong-password')) msg = "Invalid email or password."; else if (error.code.includes('email-already-in-use')) msg = "This email is already registered."; } setAuthError(msg); console.error("Auth Error:", error); };
-    const handleLogin = async (email, password) => { setAuthLoading(true); setAuthError(null); try { await signInWithEmailAndPassword(auth, email, password); } catch (e) { handleAuthError(e); } finally { setAuthLoading(false); } };
-    const handleSignup = async (email, password) => { setAuthLoading(true); setAuthError(null); try { await createUserWithEmailAndPassword(auth, email, password); } catch (e) { handleAuthError(e); } finally { setAuthLoading(false); } };
+    const handleLogin = async (email, password) => {
+        setAuthLoading(true); setAuthError(null);
+        try {
+            const userCredential = await signInWithEmailAndPassword(auth, email, password);
+            const pendingGroupId = sessionStorage.getItem('pending-join-groupId');
+            if (pendingGroupId && userCredential.user) {
+                await joinGroupSecurely(pendingGroupId, userCredential.user);
+                sessionStorage.removeItem('pending-join-groupId');
+            }
+        } catch (e) { handleAuthError(e); } finally { setAuthLoading(false); }
+    };
+    const handleSignup = async (email, password) => {
+        setAuthLoading(true); setAuthError(null);
+        try {
+            const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+            const pendingGroupId = sessionStorage.getItem('pending-join-groupId');
+            if (pendingGroupId && userCredential.user) {
+                await joinGroupSecurely(pendingGroupId, userCredential.user);
+                sessionStorage.removeItem('pending-join-groupId');
+            }
+        } catch (e) { handleAuthError(e); } finally { setAuthLoading(false); }
+    };
     const handleLogout = async () => { try { await signOut(auth); localStorage.removeItem('pragati-viewMode'); localStorage.removeItem('pragati-currentGroupId'); } catch (e) { console.error("Logout Error:", e); }};
     if (!isAuthReady) { return <div className="flex items-center justify-center min-h-screen bg-gray-50"><div className="text-gray-500 font-medium">Connecting...</div></div>; }
-    if (!currentUserId) { return <AuthScreen onLogin={handleLogin} onSignup={handleSignup} loading={authLoading} error={authError} />; }
-    return <TaskManagementView currentUserId={currentUserId} currentUserEmail={currentUserEmail} onLogout={handleLogout} />;
+    
+    return (
+        <Router>
+            <Routes>
+                <Route path="/join/:groupId" element={<JoinHandler />} />
+                <Route path="/auth" element={currentUserId ? <Navigate to="/" /> : <AuthScreen onLogin={handleLogin} onSignup={handleSignup} loading={authLoading} error={authError} />} />
+                <Route path="/" element={currentUserId ? <TaskManagementView currentUserId={currentUserId} currentUserEmail={currentUserEmail} onLogout={handleLogout} /> : <Navigate to="/auth" />} />
+                <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+        </Router>
+    );
 };
 
 export default App;
